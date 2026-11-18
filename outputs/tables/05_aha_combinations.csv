@@ -1,0 +1,5 @@
+segment,users,pct_of_users,retained_users,retention_pct
+1. Invited + integrated in week 1,201,3.4,151,75.1
+2. Invited only,702,11.7,378,53.8
+3. Integrated only,534,8.9,212,39.7
+4. Neither,4563,76.0,618,13.5

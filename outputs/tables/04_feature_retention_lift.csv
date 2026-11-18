@@ -1,0 +1,7 @@
+feature,adopters,retention_adopters_pct,retention_others_pct,lift_pts,lift_rank
+invite_teammate,903,58.6,16.3,42.3,1
+connect_integration,735,49.4,18.9,30.5,2
+create_project,3221,33.5,10.1,23.4,3
+view_dashboard,950,37.2,19.9,17.3,4
+profile_setup,5124,24.6,11.4,13.2,5
+export_report,226,34.5,22.2,12.3,6

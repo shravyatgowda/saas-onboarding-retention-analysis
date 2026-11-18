@@ -1,0 +1,123 @@
+"""Run the SQL analysis on the synthetic onboarding data and export outputs.
+
+Pipeline: CSV -> SQLite -> SQL queries (sql/*.sql) -> tables, charts, Excel summary.
+
+Usage:
+    python src/generate_data.py
+    python src/run_analysis.py
+"""
+import sqlite3
+from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import pandas as pd
+from openpyxl.styles import Font, PatternFill
+from openpyxl.utils import get_column_letter
+
+ROOT = Path(__file__).resolve().parents[1]
+RAW, SQL = ROOT / "data" / "raw", ROOT / "sql"
+TABLES, FIGS = ROOT / "outputs" / "tables", ROOT / "outputs" / "figures"
+for p in (TABLES, FIGS):
+    p.mkdir(parents=True, exist_ok=True)
+
+BLUE, GREY, RED = "#2F5D8A", "#B8C2CC", "#C0504D"
+
+
+def load_db() -> sqlite3.Connection:
+    if not (RAW / "events.csv").exists():
+        raise SystemExit("data/raw/events.csv not found. Run: python src/generate_data.py")
+    con = sqlite3.connect(":memory:")
+    con.executescript((SQL / "01_schema.sql").read_text())
+    pd.read_csv(RAW / "users.csv").to_sql("users", con, if_exists="append", index=False)
+    pd.read_csv(RAW / "events.csv").to_sql("events", con, if_exists="append", index=False)
+    return con
+
+
+def q(con, name):
+    df = pd.read_sql_query((SQL / name).read_text(), con)
+    df.to_csv(TABLES / (Path(name).stem + ".csv"), index=False)
+    return df
+
+
+def style(ax, title, ylabel=None):
+    ax.set_title(title, loc="left", fontsize=12, fontweight="bold")
+    if ylabel:
+        ax.set_ylabel(ylabel)
+    ax.spines[["top", "right"]].set_visible(False)
+
+
+def main() -> None:
+    con = load_db()
+    funnel = q(con, "02_funnel.sql")
+    ret = q(con, "03_retention_by_cohort.sql")
+    lift = q(con, "04_feature_retention_lift.sql")
+    aha = q(con, "05_aha_combinations.sql")
+
+    # Chart 1: funnel
+    fig, ax = plt.subplots(figsize=(8, 4))
+    labels = funnel["step"][::-1]
+    ax.barh(labels, funnel["pct_of_signups"][::-1], color=BLUE)
+    for i, v in enumerate(funnel["pct_of_signups"][::-1]):
+        ax.text(v + 1, i, f"{v:.0f}%", va="center", fontsize=9)
+    ax.set_xlim(0, 110)
+    style(ax, "Onboarding funnel: % of signups reaching each step (synthetic data)")
+    fig.tight_layout(); fig.savefig(FIGS / "01_onboarding_funnel.png", dpi=150); plt.close(fig)
+
+    # Chart 2: retention curves by cohort
+    fig, ax = plt.subplots(figsize=(8, 4))
+    weeks = ["week0_pct", "week1_pct", "week2_pct", "day21_30_pct"]
+    for _, r in ret.iterrows():
+        ax.plot(["Wk 0", "Wk 1", "Wk 2", "Day 21-30"], [r[w] for w in weeks],
+                marker="o", linewidth=1.5, label=r["cohort_month"])
+    ax.legend(frameon=False, ncol=3, fontsize=8)
+    ax.set_ylim(0, 100)
+    style(ax, "Active users by signup cohort", "% logged in")
+    fig.tight_layout(); fig.savefig(FIGS / "02_retention_by_cohort.png", dpi=150); plt.close(fig)
+
+    # Chart 3: lift by first-week action
+    l = lift.sort_values("lift_pts")
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.barh(l["feature"], l["lift_pts"], color=[RED if v == l["lift_pts"].max() else BLUE for v in l["lift_pts"]])
+    for i, v in enumerate(l["lift_pts"]):
+        ax.text(v + 0.5, i, f"+{v:.0f} pts", va="center", fontsize=9)
+    style(ax, "Retention lift for users who did the action in week 1")
+    ax.set_xlabel("Day 21-30 retention: adopters minus non-adopters (percentage points)")
+    fig.tight_layout(); fig.savefig(FIGS / "03_feature_retention_lift.png", dpi=150); plt.close(fig)
+
+    # Chart 4: aha combinations
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.barh(aha["segment"][::-1], aha["retention_pct"][::-1],
+            color=[BLUE if "Invited + integrated" in s else GREY for s in aha["segment"][::-1]])
+    for i, v in enumerate(aha["retention_pct"][::-1]):
+        ax.text(v + 1, i, f"{v:.0f}%", va="center", fontsize=9)
+    ax.set_xlim(0, 100)
+    style(ax, "Day 21-30 retention by week-1 behaviour")
+    fig.tight_layout(); fig.savefig(FIGS / "04_aha_combinations.png", dpi=150); plt.close(fig)
+
+    xlsx = ROOT / "outputs" / "onboarding_analysis_summary.xlsx"
+    with pd.ExcelWriter(xlsx, engine="openpyxl") as xw:
+        for name, df in [("Funnel", funnel), ("Retention by cohort", ret),
+                         ("Feature lift", lift), ("Aha combinations", aha)]:
+            df.to_excel(xw, sheet_name=name, index=False)
+            ws = xw.sheets[name]
+            for c in ws[1]:
+                c.font = Font(name="Arial", bold=True, color="FFFFFF")
+                c.fill = PatternFill("solid", fgColor="2F5D8A")
+            for col in ws.columns:
+                w = max(len(str(c.value)) if c.value is not None else 0 for c in col) + 3
+                ws.column_dimensions[get_column_letter(col[0].column)].width = max(w, 12)
+            for row in ws.iter_rows(min_row=2):
+                for c in row:
+                    c.font = Font(name="Arial")
+        ws = xw.book.create_sheet("README")
+        ws["A1"] = "Source: synthetic data generated by src/generate_data.py. Values come from sql/*.sql."
+        ws["A1"].font = Font(name="Arial", italic=True)
+
+    for t in (funnel, ret, lift, aha):
+        print(t.to_string(index=False), "\n")
+
+
+if __name__ == "__main__":
+    main()
